@@ -1,152 +1,195 @@
-#include <iostream>
 #include "server.h"
+
+#include <iostream>
+#include <mutex>
+
 #include "session.h"
 
 using boost::asio::ip::tcp;
 class TCPServer;
 
-Session::Session(std::weak_ptr<TCPServer> server,
-        tcp::socket sock,
-        uint64_t session_id): 
-  server_(server),
-  socket_(std::move(sock)),
-  session_id_(session_id){
+Session::Session(std::weak_ptr<TCPServer> server, tcp::socket sock,
+                 uint64_t session_id)
+    : server_(server),
+      socket_(std::move(sock)),
+      session_id_(session_id),
+      to_be_close_(false) {}
+
+Session::~Session() {
+  if (socket_.is_open()) {
+    socket_.close();
+  }
+  std::cout << "session " << session_id_ << " destructed" << std::endl;
 }
 
-Session::~Session(){
-  std::cout << "session " << session_id_ << " destruct" << std::endl;
-}
-
-void Session::start(){
+void Session::start() {
+  std::string hello_msg = "12345678901234567890";
+  enque(hello_msg);
   read();
 }
 
-void Session::read(){
-  boost::asio::async_read_until(socket_, request_, '\n',
-      boost::bind(&Session::handle_read, this,
-          boost::asio::placeholders::error,
-          boost::asio::placeholders::bytes_transferred));
-}
-
-void Session::session_closed(){
-  std::shared_ptr<TCPServer> pServer = server_.lock();
-  if(pServer){
-    pServer->session_closed(session_id_);
+void Session::enque(std::string& str) {
+  std::scoped_lock lock(send_mutex_);
+  bool is_not_writing = send_que_.empty();
+  send_que_.emplace_back(std::vector<uint8_t>(str.begin(), str.end()));
+  if (is_not_writing) {
+    write();
   }
 }
 
-void Session::handle_read(const boost::system::error_code& error, size_t bytes_transferred)
-{
-    if (!error)
-    {
-        // Process the received data
-        std::istream is(&request_);
-        std::string line;
-        std::getline(is, line);
-        std::cout << "Received: " << line << std::endl;
-
-        // Send a response back to the client
-        std::string response = "Hello from server!\n";
-        boost::asio::async_write(socket_, boost::asio::buffer(response),
-            boost::bind(&Session::handle_write, this,
-                boost::asio::placeholders::error));
-    }
-    else
-    {
-        std::cerr << "Read error: " << error.message() << std::endl;
-
-        // Close the socket if there's an error
-        if (socket_.is_open())
-        {
-            socket_.close();
-            session_closed();
-        }
-    }
+void Session::enque(std::vector<uint8_t>& buf) {
+  std::scoped_lock lock(send_mutex_);
+  bool is_not_writing = send_que_.empty();
+  send_que_.emplace_back(std::vector<uint8_t>(buf.begin(), buf.end()));
+  if (is_not_writing) {
+    write();
+  }
 }
 
-void Session::handle_write(const boost::system::error_code& error)
-{
-    if (!error)
-    {
-        std::cout << "Response sent successfully." << std::endl;
-        read();
+void Session::setOnClosedCallback(std::function<void(uint64_t)> callback) {
+  onCloseCallback_ = callback;
+}
+
+void Session::write() {
+  boost::asio::async_write(socket_, boost::asio::buffer(send_que_.front()),
+                           boost::bind(&Session::handle_write, shared_from_this(),
+                                       boost::asio::placeholders::error));
+}
+
+void Session::read() {
+  boost::asio::async_read(
+      socket_, recv_buf_, boost::asio::transfer_at_least(1),
+      boost::bind(&Session::handle_read, shared_from_this(),
+                  boost::asio::placeholders::error,
+                  boost::asio::placeholders::bytes_transferred));
+}
+
+void Session::read_until() {
+  boost::asio::async_read_until(
+      socket_, recv_buf_, '\n',
+      boost::bind(&Session::handle_read, shared_from_this(),
+                  boost::asio::placeholders::error,
+                  boost::asio::placeholders::bytes_transferred));
+}
+
+void Session::close() {
+  if (onCloseCallback_) {
+    onCloseCallback_(session_id_);
+  }
+  to_be_close_ = true;
+}
+
+void Session::handle_read(const boost::system::error_code& error,
+                          size_t bytes_transferred) {
+  if (to_be_close_) {
+    return;
+  }
+  if (!error) {
+    // Process the received data
+    // std::istream is(&recv_buf_);
+    // std::string line;
+    // std::getline(is, line);
+    recv_buf_.consume(bytes_transferred);
+    std::cout << "Session Received: " << bytes_transferred << std::endl;
+    read();
+
+    /*
+    // Send a response back to the client
+    std::string response = "1234567890";
+    std::string send_str = "";
+    for(int i = 0; i < 1024; i++){
+      send_str += response;
     }
-    else
-    {
-        std::cerr << "Write error: " << error.message() << std::endl;
-      // Close the socket after sending the response
-      if (socket_.is_open())
-      {
-          socket_.close();
-          session_closed();
-      }
+
+    uint32_t len = send_str.length();
+
+    memcpy(&send_str[0], &len, sizeof(uint32_t));
+
+    boost::asio::async_write(socket_, boost::asio::buffer(send_str),
+                             boost::bind(&Session::handle_write, this,
+                                         boost::asio::placeholders::error));
+    */
+  } else {
+    std::cerr << "Read error: " << error.message() << std::endl;
+
+    close();
+  }
+}
+
+void Session::handle_write(const boost::system::error_code& error) {
+  if (to_be_close_) {
+    return;
+  }
+  if (!error) {
+    // std::cout << "Response sent successfully." << std::endl;
+    std::scoped_lock lock(send_mutex_);
+    // TODO: just for test
+    // send_que_.pop_front();
+    if (send_que_.size() > 0) {
+      write();
     }
+    // read();
+  } else {
+    std::cerr << "Write error: " << error.message() << std::endl;
+    // Close the socket after sending the response
+    close();
+  }
 }
 
 TCPServer::TCPServer(boost::asio::io_context& io_context, short port)
     : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)),
-      session_counter_(std::atomic<uint64_t>(0))
-{
-    start_accept();
+      session_counter_(std::atomic<uint64_t>(0)) {
+  start_accept();
 }
 
-void TCPServer::start_accept()
-{
-    // Create a new socket for the incoming connection
-    socket_.emplace(acceptor_.get_executor());
+void TCPServer::start_accept() {
+  // Create a new socket for the incoming connection
+  socket_.emplace(acceptor_.get_executor());
 
-    // Asynchronously accept a new connection
-    acceptor_.async_accept(*socket_,
-        boost::bind(&TCPServer::handle_accept, this,
-            boost::asio::placeholders::error));
+  // Asynchronously accept a new connection
+  acceptor_.async_accept(*socket_, boost::bind(&TCPServer::handle_accept, this,
+                                               boost::asio::placeholders::error));
 }
 
-void TCPServer::session_closed(uint64_t session_id){
-  std::cout << "erase session : " << session_id << std::endl;
-  sessions_.erase(session_id);
+void TCPServer::handle_accept(const boost::system::error_code& error) {
+  if (!error) {
+    // Connection accepted, start reading data from the client
+    std::shared_ptr<Session> session = std::make_shared<Session>(
+        shared_from_this(), std::move(*socket_), session_counter_);
+    sessions_[session_counter_] = session;
+
+    session->setOnClosedCallback([&](uint64_t session_id) {
+      if (sessions_.find(session_id) != sessions_.end()) {
+        sessions_.erase(session_id);
+      }
+    });
+
+    std::cout << "start session ID : " << session_counter_ << std::endl;
+    session->start();
+    session_counter_++;
+  }
+
+  // Accept another connection
+  start_accept();
 }
 
-void TCPServer::handle_accept(const boost::system::error_code& error)
-{
-    if (!error)
-    {
-      // Connection accepted, start reading data from the client
-      std::shared_ptr<Session> session 
-        = std::make_shared<Session>(shared_from_this(),
-                                    std::move(*socket_),
-                                    session_counter_);
-      sessions_[session_counter_] = session;
-      std::cout << "start session ID : " << session_counter_ << std::endl;
-      session->start();
-      session_counter_++;
+int main(int argc, char* argv[]) {
+  try {
+    if (argc != 2) {
+      std::cerr << "Usage: server <port>\n";
+      return 1;
     }
 
-    // Accept another connection
-    start_accept();
-}
+    boost::asio::io_context io_context;
 
-int main(int argc, char* argv[])
-{
-    try
-    {
-        if (argc != 2)
-        {
-            std::cerr << "Usage: server <port>\n";
-            return 1;
-        }
+    // Create and run the server
+    std::shared_ptr<TCPServer> pServer =
+        std::make_shared<TCPServer>(io_context, std::atoi(argv[1]));
 
-        boost::asio::io_context io_context;
+    io_context.run();
+  } catch (std::exception& e) {
+    std::cerr << "Exception: " << e.what() << "\n";
+  }
 
-        // Create and run the server
-        std::shared_ptr<TCPServer> pServer 
-          = std::make_shared<TCPServer>(io_context, std::atoi(argv[1]));
-
-        io_context.run();
-    }
-    catch (std::exception& e)
-    {
-        std::cerr << "Exception: " << e.what() << "\n";
-    }
-
-    return 0;
+  return 0;
 }
