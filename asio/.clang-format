@@ -7,10 +7,10 @@ ColumnLimit: 82     # 한 라인의 최대 길이를 80자로 제한
 BraceWrapping:
   AfterFunction: false        # 함수 정의 후 중괄호를 같은 줄에 배치
   AfterNamespace : false
-  AfterEnum : true
   AfterControlStatement: false # 제어문(if, while 등) 뒤 중괄호를 같은 줄에 배치
   BeforeElse: false            # else 문 앞 중괄호를 같은 줄에 배치
-  AfterCaseLabel: true # switch-case 문 뒤 중괄호를 같은 줄에 배치
   AfterClass : false
+  AfterEnum : true
+  AfterCaseLabel: true # switch-case 문 뒤 중괄호를 같은 줄에 배치
 DerivePointerAlignment: false
 PointerAlignment: Left # 포인터 *를 변수 옆에 위치
