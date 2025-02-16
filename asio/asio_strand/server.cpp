@@ -2,16 +2,19 @@
 
 #include <iostream>
 #include <mutex>
+#include <thread>
 
 #include "session.h"
 
 using boost::asio::ip::tcp;
 class TCPServer;
 
-Session::Session(std::weak_ptr<TCPServer> server, tcp::socket sock,
+Session::Session(std::weak_ptr<TCPServer> server,
+                 tcp::socket sock,
                  uint64_t session_id)
     : server_(server),
       socket_(std::move(sock)),
+      //strand_(boost::asio::make_strand(sock.get_executor())),
       session_id_(session_id),
       to_be_close_(false) {}
 
@@ -29,12 +32,17 @@ void Session::start() {
 }
 
 void Session::enque(std::string& str) {
+  
+  //boost::asio::post(strand_, [&](){
+  //});
+  /*``
   std::scoped_lock lock(send_mutex_);
   bool is_not_writing = send_que_.empty();
   send_que_.emplace_back(std::vector<uint8_t>(str.begin(), str.end()));
   if (is_not_writing) {
     write();
   }
+  */
 }
 
 void Session::enque(std::vector<uint8_t>& buf) {
@@ -76,7 +84,6 @@ void Session::close() {
   if (onCloseCallback_) {
     onCloseCallback_(session_id_);
   }
-  socket_.cancel();
   to_be_close_ = true;
 }
 
@@ -137,10 +144,17 @@ void Session::handle_write(const boost::system::error_code& error) {
   }
 }
 
-TCPServer::TCPServer(boost::asio::io_context& io_context, short port)
-    : acceptor_(io_context, tcp::endpoint(tcp::v4(), port)),
+TCPServer::TCPServer(short port)
+    : io_context_(std::make_shared<boost::asio::io_context>()),
+      acceptor_(*io_context_, tcp::endpoint(tcp::v4(), port)),
       session_counter_(std::atomic<uint64_t>(0)) {
   start_accept();
+  //io_thread_ = std::thread([io_context_](){io_context_->run();});
+  io_thread_ = std::thread([&](){io_context_->run();});
+}
+
+TCPServer::~TCPServer(){
+  io_thread_.join();
 }
 
 void TCPServer::start_accept() {
@@ -181,13 +195,13 @@ int main(int argc, char* argv[]) {
       return 1;
     }
 
-    boost::asio::io_context io_context;
+    //boost::asio::io_context io_context;
 
     // Create and run the server
     std::shared_ptr<TCPServer> pServer =
-        std::make_shared<TCPServer>(io_context, std::atoi(argv[1]));
+        std::make_shared<TCPServer>(std::atoi(argv[1]));
 
-    io_context.run();
+    //io_context.run();
   } catch (std::exception& e) {
     std::cerr << "Exception: " << e.what() << "\n";
   }
