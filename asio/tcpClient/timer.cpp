@@ -23,7 +23,7 @@ namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 using SEND_BUF_QUE = std::deque<std::vector<uint8_t>>;
 
-class TcpClient {
+class TcpClient : public std::enable_shared_from_this<TcpClient>{
 public:
   enum class State {
     IDLE,
@@ -93,7 +93,7 @@ protected:
                      recv_buf_,
                      asio::transfer_at_least(4),
                      std::bind(&TcpClient::onReceive,
-                               this,
+                               shared_from_this(),
                                std::placeholders::_1,
                                std::placeholders::_2)); 
   }
@@ -169,7 +169,7 @@ private:
     asio::async_connect(socket_,
                         ep_iter,
                         std::bind(&TcpClient::onConnect,
-                                  this,
+                                  shared_from_this(),
                                   std::placeholders::_1,
                                   std::placeholders::_2));
   }
@@ -195,7 +195,7 @@ private:
     asio::async_write(socket_,
                       asio::buffer(send_buf_que_.front()),
                       std::bind(&TcpClient::onWrite,
-                                this,
+                                shared_from_this(),
                                 std::placeholders::_1,
                                 std::placeholders::_2));
   }
